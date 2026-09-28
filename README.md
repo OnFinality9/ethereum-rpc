@@ -1,142 +1,243 @@
-# Ethereum RPC Getting Started
+# Ethereum JSON-RPC: From Chain Head to Contract State
 
-A practical introduction to calling Ethereum Mainnet over JSON-RPC. The examples use a public OnFinality endpoint so you can run them immediately without creating an account.
+Ethereum applications talk to the execution layer through JSON-RPC. This guide starts with raw RPC calls so you can see what a wallet, SDK, indexer, or backend is actually asking a node to do.
 
-## RPC endpoint
-
-```text
-https://eth.api.onfinality.io/public
-```
-
-Ethereum uses JSON-RPC 2.0 over HTTP.
-
-## 1. Verify the network
+The examples use a public Ethereum endpoint from OnFinality:
 
 ```bash
-curl -s https://eth.api.onfinality.io/public \
+export ETH_RPC=https://eth.api.onfinality.io/public
+```
+
+No API key is required for the examples below.
+
+## The useful mental model: gossip, state, and history
+
+Ethereum's own JSON-RPC documentation groups many common methods into three practical buckets:
+
+- **Gossip**: follow the head of the chain and submit transactions.
+- **State**: ask what the EVM state looks like at a particular block.
+- **History**: retrieve blocks, transactions, receipts, and logs that already exist.
+
+That distinction helps when debugging RPC problems. A node may be perfectly healthy for current-state reads while a deep historical-state query still requires archive data.
+
+## 1. Confirm that you are on Ethereum Mainnet
+
+Ethereum Mainnet has chain ID `1`.
+
+```bash
+curl -s "$ETH_RPC" \
   -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_chainId",
+    "params":[]
+  }'
 ```
 
-Ethereum Mainnet has chain ID `1`, returned as `0x1`.
+The result should be:
 
-## 2. Get the latest block
+```json
+{"jsonrpc":"2.0","id":1,"result":"0x1"}
+```
+
+Ethereum JSON-RPC encodes quantities as compact hexadecimal values. `0x1` is decimal `1`; `0x10` is decimal `16`.
+
+## 2. Follow the chain head
+
+`eth_blockNumber` returns the latest block number known to the node.
 
 ```bash
-curl -s https://eth.api.onfinality.io/public \
+curl -s "$ETH_RPC" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
 ```
 
-The result is hexadecimal. Convert it with:
-
-```js
-const block = Number.parseInt('0x1234', 16);
-```
-
-To fetch a block object:
+To fetch the actual block rather than just its height:
 
 ```bash
-curl -s https://eth.api.onfinality.io/public \
+curl -s "$ETH_RPC" \
   -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}'
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_getBlockByNumber",
+    "params":["latest",false]
+  }'
 ```
 
-## 3. Read an ETH balance
+The second parameter controls whether the block contains full transaction objects (`true`) or only transaction hashes (`false`).
+
+## 3. Read Ethereum state at a block
+
+A balance is state, so the request includes a block tag.
 
 ```bash
-curl -s https://eth.api.onfinality.io/public \
+curl -s "$ETH_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
     "id":1,
     "method":"eth_getBalance",
-    "params":["0x0000000000000000000000000000000000000000","latest"]
+    "params":["0xYOUR_ADDRESS","latest"]
   }'
 ```
 
-The result is a hex-encoded wei value.
+The returned value is denominated in wei and encoded as hex.
 
-## 4. Call a smart contract
+For applications that care about stronger settlement guarantees, execution clients also understand tags such as `safe` and `finalized` where supported by the node/client combination.
 
-Use `eth_call` for read-only contract calls:
+## 4. Call a contract without sending a transaction
+
+`eth_call` executes EVM code locally against a selected block state. It does not publish a transaction and does not consume gas onchain.
 
 ```bash
-curl -s https://eth.api.onfinality.io/public \
+curl -s "$ETH_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
     "id":1,
     "method":"eth_call",
     "params":[
-      {"to":"0xYOUR_CONTRACT_ADDRESS","data":"0xYOUR_ABI_ENCODED_CALLDATA"},
+      {
+        "to":"0xCONTRACT_ADDRESS",
+        "data":"0xABI_ENCODED_CALLDATA"
+      },
       "latest"
     ]
   }'
 ```
 
-Use an ABI-aware library such as ethers or viem in real applications instead of manually encoding calldata.
+In production code, ABI-aware libraries such as viem or ethers are usually easier than constructing calldata by hand.
 
-## 5. Use the endpoint from JavaScript
+## 5. Work with transaction history
+
+Fetch a transaction:
+
+```bash
+curl -s "$ETH_RPC" \
+  -H 'content-type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_getTransactionByHash",
+    "params":["0xTRANSACTION_HASH"]
+  }'
+```
+
+Then fetch its receipt:
+
+```bash
+curl -s "$ETH_RPC" \
+  -H 'content-type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_getTransactionReceipt",
+    "params":["0xTRANSACTION_HASH"]
+  }'
+```
+
+The receipt is usually the object you want when checking whether execution succeeded. Important fields include `status`, `blockNumber`, `gasUsed`, and `logs`.
+
+A `null` receipt normally means the transaction has not been included yet, the hash is wrong, or the node does not know the transaction.
+
+## 6. Query contract events
+
+Logs are emitted by contracts and stored in transaction receipts. `eth_getLogs` lets you scan them directly:
+
+```bash
+curl -s "$ETH_RPC" \
+  -H 'content-type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_getLogs",
+    "params":[{
+      "fromBlock":"0xSTART_BLOCK",
+      "toBlock":"0xEND_BLOCK",
+      "address":"0xCONTRACT_ADDRESS"
+    }]
+  }'
+```
+
+For an indexer, avoid asking for an enormous range in one request. Process bounded windows and persist the last successfully indexed block.
+
+## 7. Estimate first, sign locally, broadcast last
+
+Before building a transaction, estimate its execution gas:
+
+```bash
+curl -s "$ETH_RPC" \
+  -H 'content-type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_estimateGas",
+    "params":[{
+      "from":"0xYOUR_ADDRESS",
+      "to":"0xDESTINATION",
+      "value":"0x0",
+      "data":"0x"
+    }]
+  }'
+```
+
+A normal application signs the transaction locally, then sends only the signed bytes:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "eth_sendRawTransaction",
+  "params": ["0xSIGNED_TRANSACTION"]
+}
+```
+
+Never send a private key to an RPC endpoint.
+
+## Minimal JavaScript RPC client
+
+Node 18+ has `fetch`, so no dependency is required:
 
 ```js
-const RPC_URL = 'https://eth.api.onfinality.io/public';
+const rpcUrl = 'https://eth.api.onfinality.io/public';
+let id = 0;
 
 async function rpc(method, params = []) {
-  const res = await fetch(RPC_URL, {
+  const response = await fetch(rpcUrl, {
     method: 'POST',
     headers: {'content-type': 'application/json'},
-    body: JSON.stringify({jsonrpc: '2.0', id: 1, method, params}),
+    body: JSON.stringify({jsonrpc: '2.0', id: ++id, method, params}),
   });
 
-  const body = await res.json();
-  if (body.error) throw new Error(body.error.message);
+  const body = await response.json();
+  if (body.error) throw new Error(`${body.error.code}: ${body.error.message}`);
   return body.result;
 }
 
 const chainId = Number.parseInt(await rpc('eth_chainId'), 16);
-const block = Number.parseInt(await rpc('eth_blockNumber'), 16);
-console.log({chainId, block});
+const blockNumber = Number.parseInt(await rpc('eth_blockNumber'), 16);
+
+console.log({chainId, blockNumber});
 ```
 
-## Useful methods
+## Common Ethereum RPC gotchas
 
-| Method | Use |
-| --- | --- |
-| `eth_getTransactionByHash` | Fetch a transaction |
-| `eth_getTransactionReceipt` | Check execution status and logs |
-| `eth_getCode` | Check contract bytecode |
-| `eth_getLogs` | Query contract events |
-| `eth_estimateGas` | Estimate gas |
-| `eth_feeHistory` | Inspect recent fee data |
-| `eth_sendRawTransaction` | Broadcast a signed transaction |
+### Hex quantities are not normal decimal strings
 
-## Troubleshooting
+Block numbers, balances, nonces, gas values, and many other numeric fields are returned as hex quantities. Convert them deliberately rather than assuming decimal.
 
-### `429 Too Many Requests`
+### Historical block access is not the same as historical state access
 
-Public endpoints are shared. Reduce concurrency, cache repeated reads, use retry/backoff logic, or move sustained traffic to an authenticated endpoint.
+A node can retain old block bodies while pruning old state tries. Queries such as an old `eth_getBalance(..., blockNumber)` may therefore require archive access even when `eth_getBlockByNumber` for the same block works.
 
-### `execution reverted`
+### JSON-RPC is the execution API, not the Beacon API
 
-This usually comes from EVM execution rather than the HTTP connection. Verify the contract address, calldata, caller assumptions, and block tag.
+Ethereum consensus-layer data is exposed through the Beacon API. The JSON-RPC calls in this repository target the execution layer.
 
-### Historical state is missing
+## References
 
-Very old state queries may require archive access. Historical blocks and historical state are not the same capability.
-
-## Mainnet settings
-
-| Setting | Value |
-| --- | --- |
-| Network | Ethereum Mainnet |
-| Chain ID | `1` |
-| Native token | ETH |
-| RPC | `https://eth.api.onfinality.io/public` |
-| WebSocket | `wss://eth.api.onfinality.io/public-ws` |
-
-## Resources
-
-- [Ethereum JSON-RPC documentation](https://ethereum.org/en/developers/apis/json-rpc/)
+- [Ethereum JSON-RPC API](https://ethereum.org/en/developers/docs/apis/json-rpc/)
 - [OnFinality Ethereum RPC](https://onfinality.io/en/networks/eth)
-- [OnFinality RPC network directory](https://onfinality.io/en/networks)
+- [OnFinality network directory](https://onfinality.io/en/networks)
